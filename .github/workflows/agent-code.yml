@@ -111,7 +111,7 @@ jobs:
               json.dump(payload, f, ensure_ascii=False)
           PY
 
-            - name: Call Gemini Coding Agent
+      - name: Call Gemini Coding Agent
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
@@ -172,17 +172,6 @@ jobs:
             cat gemini-response.json || true
             exit 1
           fi
-
-            if [ "$ATTEMPT" -eq "$MAX_ATTEMPTS" ]; then
-              echo "Gemini failed after $MAX_ATTEMPTS attempts."
-              echo "Response:"
-              cat gemini-response.json || true
-              exit 1
-            fi
-
-            echo "Waiting 15 seconds before retry..."
-            sleep 15
-          done
 
       - name: Apply generated files
         run: |
