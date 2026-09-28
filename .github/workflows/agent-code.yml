@@ -33,11 +33,11 @@ jobs:
           BRANCH="agent/${TASK_ID}"
           echo "AGENT_BRANCH=$BRANCH" >> "$GITHUB_ENV"
 
-          git checkout -b "$BRANCH"
+          git checkout -B "$BRANCH"
 
           echo "Created branch: $BRANCH"
 
-      - name: Prepare coding request
+      - name: Prepare OpenAI coding request
         env:
           TASK_ID: ${{ inputs.task_id }}
           TASK_SPEC: ${{ inputs.spec }}
@@ -69,7 +69,7 @@ jobs:
           - Keep dependencies minimal.
           - Make the UI responsive.
           - Do not require interactive setup commands.
-          - The project must be able to run with npm install and npm run build.
+          - The project must run with npm install and npm run build.
 
           IMPORTANT:
           Return ONLY valid JSON.
@@ -88,88 +88,79 @@ jobs:
           }}
 
           Include every file that needs to be created or replaced.
-          Do not include node_modules, lock files, build output, secrets, or binary files.
+
+          Do not include:
+          - node_modules
+          - lock files
+          - build output
+          - secrets
+          - binary files
           """
 
           payload = {
-              "contents": [
-                  {
-                      "role": "user",
-                      "parts": [
-                          {
-                              "text": prompt
-                          }
-                      ]
+              "model": "gpt-5.6-sol",
+              "input": prompt,
+              "reasoning": {
+                  "effort": "medium"
+              },
+              "text": {
+                  "format": {
+                      "type": "json_object"
                   }
-              ],
-              "generationConfig": {
-                  "responseMimeType": "application/json"
               }
           }
 
-          with open("gemini-request.json", "w", encoding="utf-8") as f:
+          with open("openai-request.json", "w", encoding="utf-8") as f:
               json.dump(payload, f, ensure_ascii=False)
           PY
 
-      - name: Call Gemini Coding Agent
+      - name: Call OpenAI Coding Agent
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          if [ -z "$GEMINI_API_KEY" ]; then
-            echo "GEMINI_API_KEY is missing"
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "OPENAI_API_KEY is missing"
             exit 1
           fi
 
-          MODELS=(
-            "gemini-3.8-flash"
-            "gemini-3.7-flash"
-            "gemini-3.6-flash"
-          )
-
           SUCCESS=false
 
-          for MODEL in "${MODELS[@]}"; do
+          for ATTEMPT in 1 2 3; do
             echo "======================================"
-            echo "Trying model: $MODEL"
+            echo "OpenAI attempt $ATTEMPT/3"
             echo "======================================"
 
-            for ATTEMPT in 1 2; do
-              echo "Attempt $ATTEMPT/2"
+            HTTP_CODE=$(curl \
+              --silent \
+              --show-error \
+              --output openai-response.json \
+              --write-out "%{http_code}" \
+              --request POST \
+              --header "Content-Type: application/json" \
+              --header "Authorization: Bearer $OPENAI_API_KEY" \
+              --data @openai-request.json \
+              "https://api.openai.com/v1/responses")
 
-              HTTP_CODE=$(curl \
-                --silent \
-                --show-error \
-                --output gemini-response.json \
-                --write-out "%{http_code}" \
-                --request POST \
-                --header "Content-Type: application/json" \
-                --header "x-goog-api-key: $GEMINI_API_KEY" \
-                --data @gemini-request.json \
-                "https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent")
+            echo "HTTP status: $HTTP_CODE"
 
-              echo "HTTP status: $HTTP_CODE"
+            if [ "$HTTP_CODE" = "200" ]; then
+              SUCCESS=true
+              break
+            fi
 
-              if [ "$HTTP_CODE" = "200" ]; then
-                echo "Success with model: $MODEL"
-                SUCCESS=true
-                break 2
-              fi
+            echo "OpenAI request failed."
 
-              echo "Model $MODEL failed."
+            cat openai-response.json || true
 
-              if [ "$ATTEMPT" -lt 2 ]; then
-                echo "Waiting 10 seconds before retry..."
-                sleep 10
-              fi
-            done
-
-            echo "Switching to fallback model..."
+            if [ "$ATTEMPT" -lt 3 ]; then
+              echo ""
+              echo "Waiting 10 seconds before retry..."
+              sleep 10
+            fi
           done
 
           if [ "$SUCCESS" != "true" ]; then
-            echo "All Gemini models failed."
-            echo "Last response:"
-            cat gemini-response.json || true
+            echo "OpenAI failed after 3 attempts."
             exit 1
           fi
 
@@ -180,20 +171,32 @@ jobs:
           import os
           import sys
 
-          with open("gemini-response.json", "r", encoding="utf-8") as f:
+          with open("openai-response.json", "r", encoding="utf-8") as f:
               response = json.load(f)
 
-          try:
-              text = response["candidates"][0]["content"]["parts"][0]["text"]
-          except (KeyError, IndexError, TypeError):
-              print("Gemini response does not contain generated content.")
+          text = None
+
+          for item in response.get("output", []):
+              if item.get("type") != "message":
+                  continue
+
+              for content in item.get("content", []):
+                  if content.get("type") == "output_text":
+                      text = content.get("text")
+                      break
+
+              if text:
+                  break
+
+          if not text:
+              print("OpenAI response does not contain output_text.")
               print(json.dumps(response, indent=2))
               sys.exit(1)
 
           try:
               result = json.loads(text)
           except json.JSONDecodeError as exc:
-              print("Gemini did not return valid JSON.")
+              print("OpenAI did not return valid JSON.")
               print(text)
               raise exc
 
@@ -219,7 +222,10 @@ jobs:
                   print("Unsafe path rejected:", path)
                   sys.exit(1)
 
-              os.makedirs(os.path.dirname(target), exist_ok=True)
+              parent = os.path.dirname(target)
+
+              if parent:
+                  os.makedirs(parent, exist_ok=True)
 
               with open(target, "w", encoding="utf-8") as f:
                   f.write(content)
@@ -229,8 +235,8 @@ jobs:
 
       - name: Remove agent temporary files
         run: |
-          rm -f gemini-request.json
-          rm -f gemini-response.json
+          rm -f openai-request.json
+          rm -f openai-response.json
 
       - name: Verify package.json
         run: |
@@ -263,6 +269,6 @@ jobs:
 
           git commit -m "${TASK_ID}: implement agent task"
 
-          git push origin "$AGENT_BRANCH"
+          git push --force-with-lease origin "$AGENT_BRANCH"
 
           echo "Code pushed to $AGENT_BRANCH"
