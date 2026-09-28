@@ -1,0 +1,50 @@
+name: Agent Coding Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "Agent task ID"
+        required: true
+        type: string
+
+      spec:
+        description: "Implementation specification"
+        required: true
+        type: string
+
+jobs:
+  agent-code:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show task information
+        env:
+          TASK_ID: ${{ inputs.task_id }}
+          TASK_SPEC: ${{ inputs.spec }}
+        run: |
+          echo "================================"
+          echo "AI CODING WORKER"
+          echo "================================"
+          echo "Task ID: $TASK_ID"
+          echo ""
+          echo "Specification:"
+          echo "$TASK_SPEC"
+          echo ""
+          echo "================================"
+
+      - name: Check workspace
+        run: |
+          echo "Current directory:"
+          pwd
+
+          echo ""
+          echo "Repository files:"
+          ls -la
+
+          echo ""
+          echo "Git branch:"
+          git branch --show-current
