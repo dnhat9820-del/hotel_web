@@ -111,7 +111,7 @@ jobs:
               json.dump(payload, f, ensure_ascii=False)
           PY
 
-      - name: Call Gemini Coding Agent
+            - name: Call Gemini Coding Agent
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
@@ -120,28 +120,58 @@ jobs:
             exit 1
           fi
 
-          MAX_ATTEMPTS=3
+          MODELS=(
+            "gemini-3.8-flash"
+            "gemini-3.7-flash"
+            "gemini-3.6-flash"
+          )
 
-          for ATTEMPT in $(seq 1 $MAX_ATTEMPTS); do
-            echo "Gemini request attempt $ATTEMPT/$MAX_ATTEMPTS"
+          SUCCESS=false
 
-            HTTP_CODE=$(curl \
-              --silent \
-              --show-error \
-              --output gemini-response.json \
-              --write-out "%{http_code}" \
-              --request POST \
-              --header "Content-Type: application/json" \
-              --header "x-goog-api-key: $GEMINI_API_KEY" \
-              --data @gemini-request.json \
-              "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent")
+          for MODEL in "${MODELS[@]}"; do
+            echo "======================================"
+            echo "Trying model: $MODEL"
+            echo "======================================"
 
-            echo "Gemini HTTP status: $HTTP_CODE"
+            for ATTEMPT in 1 2; do
+              echo "Attempt $ATTEMPT/2"
 
-            if [ "$HTTP_CODE" = "200" ]; then
-              echo "Gemini request successful"
-              break
-            fi
+              HTTP_CODE=$(curl \
+                --silent \
+                --show-error \
+                --output gemini-response.json \
+                --write-out "%{http_code}" \
+                --request POST \
+                --header "Content-Type: application/json" \
+                --header "x-goog-api-key: $GEMINI_API_KEY" \
+                --data @gemini-request.json \
+                "https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent")
+
+              echo "HTTP status: $HTTP_CODE"
+
+              if [ "$HTTP_CODE" = "200" ]; then
+                echo "Success with model: $MODEL"
+                SUCCESS=true
+                break 2
+              fi
+
+              echo "Model $MODEL failed."
+
+              if [ "$ATTEMPT" -lt 2 ]; then
+                echo "Waiting 10 seconds before retry..."
+                sleep 10
+              fi
+            done
+
+            echo "Switching to fallback model..."
+          done
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo "All Gemini models failed."
+            echo "Last response:"
+            cat gemini-response.json || true
+            exit 1
+          fi
 
             if [ "$ATTEMPT" -eq "$MAX_ATTEMPTS" ]; then
               echo "Gemini failed after $MAX_ATTEMPTS attempts."
