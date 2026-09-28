@@ -13,6 +13,9 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: write
+
 jobs:
   agent-code:
     runs-on: ubuntu-latest
@@ -20,31 +23,201 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Show task information
+      - name: Create agent branch
+        env:
+          TASK_ID: ${{ inputs.task_id }}
+        run: |
+          BRANCH="agent/${TASK_ID}"
+          echo "AGENT_BRANCH=$BRANCH" >> "$GITHUB_ENV"
+
+          git checkout -b "$BRANCH"
+
+          echo "Created branch: $BRANCH"
+
+      - name: Prepare coding request
         env:
           TASK_ID: ${{ inputs.task_id }}
           TASK_SPEC: ${{ inputs.spec }}
         run: |
-          echo "================================"
-          echo "AI CODING WORKER"
-          echo "================================"
-          echo "Task ID: $TASK_ID"
-          echo ""
-          echo "Specification:"
-          echo "$TASK_SPEC"
-          echo ""
-          echo "================================"
+          python3 <<'PY'
+          import json
+          import os
 
-      - name: Check workspace
+          task_id = os.environ["TASK_ID"]
+          spec = os.environ["TASK_SPEC"]
+
+          prompt = f"""
+          You are an autonomous senior software engineer working inside a GitHub Actions workspace.
+
+          TASK ID:
+          {task_id}
+
+          IMPLEMENTATION SPECIFICATION:
+          {spec}
+
+          The repository may currently contain only a README.
+
+          Your job is to create or modify the project so the specification is implemented.
+
+          For a new web project:
+          - Use Next.js with TypeScript.
+          - Use the App Router.
+          - Create a complete runnable project.
+          - Keep dependencies minimal.
+          - Make the UI responsive.
+          - Do not require interactive setup commands.
+          - The project must be able to run with npm install and npm run build.
+
+          IMPORTANT:
+          Return ONLY valid JSON.
+          Do not use markdown fences.
+          Do not include explanations outside JSON.
+
+          Required JSON format:
+
+          {{
+            "files": [
+              {{
+                "path": "package.json",
+                "content": "file contents here"
+              }}
+            ]
+          }}
+
+          Include every file that needs to be created or replaced.
+          Do not include node_modules, lock files, build output, secrets, or binary files.
+          """
+
+          payload = {
+              "contents": [
+                  {
+                      "role": "user",
+                      "parts": [
+                          {
+                              "text": prompt
+                          }
+                      ]
+                  }
+              ],
+              "generationConfig": {
+                  "responseMimeType": "application/json"
+              }
+          }
+
+          with open("gemini-request.json", "w", encoding="utf-8") as f:
+              json.dump(payload, f, ensure_ascii=False)
+          PY
+
+      - name: Call Gemini Coding Agent
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          echo "Current directory:"
-          pwd
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "GEMINI_API_KEY is missing"
+            exit 1
+          fi
 
-          echo ""
-          echo "Repository files:"
-          ls -la
+          curl --fail-with-body \
+            --silent \
+            --show-error \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-goog-api-key: $GEMINI_API_KEY" \
+            --data @gemini-request.json \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent" \
+            > gemini-response.json
 
-          echo ""
-          echo "Git branch:"
-          git branch --show-current
+      - name: Apply generated files
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import sys
+
+          with open("gemini-response.json", "r", encoding="utf-8") as f:
+              response = json.load(f)
+
+          try:
+              text = response["candidates"][0]["content"]["parts"][0]["text"]
+          except (KeyError, IndexError, TypeError):
+              print("Gemini response does not contain generated content.")
+              print(json.dumps(response, indent=2))
+              sys.exit(1)
+
+          try:
+              result = json.loads(text)
+          except json.JSONDecodeError as exc:
+              print("Gemini did not return valid JSON.")
+              print(text)
+              raise exc
+
+          files = result.get("files")
+
+          if not isinstance(files, list) or not files:
+              print("No files were returned by the coding agent.")
+              sys.exit(1)
+
+          root = os.path.realpath(os.getcwd())
+
+          for item in files:
+              path = item.get("path")
+              content = item.get("content")
+
+              if not isinstance(path, str) or not isinstance(content, str):
+                  print("Invalid file entry:", item)
+                  sys.exit(1)
+
+              target = os.path.realpath(os.path.join(root, path))
+
+              if not (target == root or target.startswith(root + os.sep)):
+                  print("Unsafe path rejected:", path)
+                  sys.exit(1)
+
+              os.makedirs(os.path.dirname(target), exist_ok=True)
+
+              with open(target, "w", encoding="utf-8") as f:
+                  f.write(content)
+
+              print("Written:", path)
+          PY
+
+      - name: Remove agent temporary files
+        run: |
+          rm -f gemini-request.json
+          rm -f gemini-response.json
+
+      - name: Verify package.json
+        run: |
+          if [ ! -f package.json ]; then
+            echo "Coding agent did not create package.json"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build project
+        run: npm run build
+
+      - name: Commit generated code
+        env:
+          TASK_ID: ${{ inputs.task_id }}
+        run: |
+          git config user.name "agent-coding-worker"
+          git config user.email "agent-coding-worker@users.noreply.github.com"
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No code changes generated."
+            exit 0
+          fi
+
+          git commit -m "${TASK_ID}: implement agent task"
+
+          git push origin "$AGENT_BRANCH"
+
+          echo "Code pushed to $AGENT_BRANCH"
