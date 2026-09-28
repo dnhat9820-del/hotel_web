@@ -120,15 +120,39 @@ jobs:
             exit 1
           fi
 
-          curl --fail-with-body \
-            --silent \
-            --show-error \
-            --request POST \
-            --header "Content-Type: application/json" \
-            --header "x-goog-api-key: $GEMINI_API_KEY" \
-            --data @gemini-request.json \
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent" \
-            > gemini-response.json
+          MAX_ATTEMPTS=3
+
+          for ATTEMPT in $(seq 1 $MAX_ATTEMPTS); do
+            echo "Gemini request attempt $ATTEMPT/$MAX_ATTEMPTS"
+
+            HTTP_CODE=$(curl \
+              --silent \
+              --show-error \
+              --output gemini-response.json \
+              --write-out "%{http_code}" \
+              --request POST \
+              --header "Content-Type: application/json" \
+              --header "x-goog-api-key: $GEMINI_API_KEY" \
+              --data @gemini-request.json \
+              "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent")
+
+            echo "Gemini HTTP status: $HTTP_CODE"
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Gemini request successful"
+              break
+            fi
+
+            if [ "$ATTEMPT" -eq "$MAX_ATTEMPTS" ]; then
+              echo "Gemini failed after $MAX_ATTEMPTS attempts."
+              echo "Response:"
+              cat gemini-response.json || true
+              exit 1
+            fi
+
+            echo "Waiting 15 seconds before retry..."
+            sleep 15
+          done
 
       - name: Apply generated files
         run: |
@@ -172,7 +196,7 @@ jobs:
 
               target = os.path.realpath(os.path.join(root, path))
 
-              if not (target == root or target.startswith(root + os.sep)):
+              if not target.startswith(root + os.sep):
                   print("Unsafe path rejected:", path)
                   sys.exit(1)
 
@@ -195,6 +219,8 @@ jobs:
             echo "Coding agent did not create package.json"
             exit 1
           fi
+
+          echo "package.json found"
 
       - name: Install dependencies
         run: npm install
